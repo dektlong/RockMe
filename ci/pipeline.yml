@@ -1,0 +1,220 @@
+resources:
+- name: git-repo
+  type: git
+  source:
+    uri: {{GIT_REPO}}
+    PASSWORD: {{GIT_PERSONAL_ACCESS_TOKEN}}
+    branch: master
+#    private_key: {{GIT_PRIVATE_KEY}}
+
+#- name: git-repo-blue-green
+#  type: git
+#  source:
+#    uri: {{GIT_REPO}}
+#    branch: master
+#    private_key: {{GIT_PRIVATE_KEY}}
+#    params:
+#      repository: git-repo-output
+
+- name: push-TAS-TEST-cloud
+  type: cf
+  source:
+    api: {{TAS_TEST_API}}
+    username: {{TAS_TEST_USER}}
+    password: {{TAS_TEST_PASS}}
+    organization: {{TAS_TEST_ORG}}
+    space: {{TAS_TEST_SPACE}}
+    skip_cert_check: true
+
+- name: push-TAS-UAT-cloud
+  type: cf
+  source:
+    api: {{TAS_UAT_API}}
+    username: {{TAS_UAT_USER}}
+    password: {{TAS_UAT_PASS}}
+    organization: {{TAS_UAT_ORG}}
+    space: {{TAS_UAT_SPACE}}
+    skip_cert_check: true
+
+- name: push-TAS-PROD-cloud
+  type: cf
+  source:
+    api: {{TAS_PROD_API}}
+    username: {{TAS_PROD_USER}}
+    password: {{TAS_PROD_PASS}}
+    organization: {{TAS_PROD_ORG}}
+    space: {{TAS_PROD_SPACE}}
+    skip_cert_check: true
+
+- name: version
+  type: semver
+  source:
+    bucket: {{S3_BUCKET}}
+    key: {{S3_VERSION_FILE}}
+    access_key_id: {{S3_ACCESS_KEY_ID}}
+    secret_access_key: {{S3_SECRET_ACCESS_KEY}}
+    initial_version: 1.0.0
+
+- name: release-candidate
+  type: s3
+  source:
+    bucket: {{S3_BUCKET}}
+    regexp: {{S3_PIPELINE_ARTIFACTS}}
+    access_key_id: {{S3_ACCESS_KEY_ID}}
+    secret_access_key: {{S3_SECRET_ACCESS_KEY}}
+
+- name: production-release
+  type: s3
+  source:
+    bucket: {{S3_BUCKET}}
+    regexp: {{S3_DEPLOYMENTS}}
+    access_key_id: {{S3_ACCESS_KEY_ID}}
+    secret_access_key: {{S3_SECRET_ACCESS_KEY}}
+
+- name: cve-file
+  type: s3
+  source:
+    bucket: {{S3_BUCKET}}
+    regexp: {{S3_BLUE_GREEN}}
+    access_key_id: {{S3_ACCESS_KEY_ID}}
+    secret_access_key: {{S3_SECRET_ACCESS_KEY}}
+
+
+jobs:
+- name: unit-tests
+  plan:
+  - get: git-repo
+    trigger: true
+  - task: unit
+    file: git-repo/ci/tasks/unit.yml
+
+- name: build-RockMe
+  serial_groups: [version]
+  serial: true
+  plan:
+  - get: git-repo
+    passed: [unit-tests]
+    trigger: true
+  - get: version
+    params: { pre: rc }
+  - task: build-artifact
+    file: git-repo/ci/tasks/build-artifact.yml
+    timeout: 5m
+  - put: release-candidate
+    params:
+      file: artifact-dir/spring-music*.jar
+  #- put: git-repo
+   # params:
+    #  repository: git-repo
+     # tag: version/number
+  - put: version
+    params: {file: version/number}
+
+- name: test-RockMe
+  serial_groups: [version]
+  plan:
+  - aggregate:
+    - get: version
+      passed: [build-RockMe]
+      trigger: true
+    - get: release-candidate
+      passed: [build-RockMe]
+    - get: git-repo
+      passed: [build-RockMe]
+  - put: push-TAS-TEST-cloud
+    params:
+      manifest: git-repo/manifest-test.yml
+      current_app_name: rockme-test
+      path: release-candidate/spring-music*.jar
+  - task: verify
+    file: git-repo/ci/tasks/verify-test.yml
+    params:
+      CONCOURSE_DEMO_URL: {{VERIFY_URL}}
+
+- name: integrate-RockMe
+  serial_groups: [version]
+  plan:
+  - aggregate:
+    - get: release-candidate
+      passed: [test-RockMe]
+      trigger: true
+    - get: version
+      passed: [test-RockMe]
+    - get: git-repo
+      passed: [test-RockMe]
+  - put: push-TAS-UAT-cloud
+    params:
+      manifest: git-repo/manifest-uat.yml
+      current_app_name: rockme-uat
+      path: release-candidate/spring-music*.jar
+
+- name: ship-RockMe
+  serial_groups: [version]
+  serial: true
+  plan:
+  - aggregate:
+    - get: release-candidate
+      passed: [integrate-RockMe]
+      trigger: true
+    - get: version
+      params: { bump: final }
+      passed: [integrate-RockMe]
+    - get: git-repo
+      passed: [integrate-RockMe]
+  - task: prepare-final
+    file: git-repo/ci/tasks/prepare-final.yml
+    params:
+      base_name: rockme
+  - put: production-release
+    params:
+      file: final-dir/spring-music*.jar
+  - put: push-TAS-PROD-cloud
+    params:
+      manifest: git-repo/manifest-prod.yml
+      current_app_name: spring-music
+      path: final-dir/spring-music*.jar
+
+- name: restart
+  plan:
+  - aggregate:
+    - get: git-repo
+    - get: version
+      passed: [patch]
+      trigger: true
+    - get: cve-file
+  - task: restart-it
+    file: git-repo/ci/tasks/restart.yml
+    params:
+      GIT_REPO: {{GIT_REPO}}
+      PASSWORD: {{GIT_PERSONAL_ACCESS_TOKEN}}
+      S3_BUCKET: {{S3_BUCKET}}
+      S3_BLUE_GREEN_FILE: {{S3_BLUE_GREEN}}
+      S3_ACCESS_KEY_ID: {{S3_ACCESS_KEY_ID}}
+      S3_SECRET_ACCESS_KEY: {{S3_SECRET_ACCESS_KEY}}
+  - put: cve-file
+    params:
+      file: blue-green-output/*
+  # - put: git-repo-blue-green
+  # params:
+  #   repository: git-repo
+
+- name: major
+  serial_groups: [ version ]
+  plan:
+  - put: version
+    params: { bump: major, pre: rc }
+
+- name: minor
+  serial_groups: [ version ]
+  plan:
+  - put: version
+    params: { bump: minor, pre: rc }
+
+- name: patch
+  serial_groups: [ version ]
+  plan:
+  - get: version
+    passed: [ ship-RockMe ]
+    trigger: true
+  - put: version
+    params: { bump: patch }
