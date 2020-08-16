@@ -1,5 +1,9 @@
 ---
 applications:
-- name: brian-spring-music
+- name: rockme
   memory: 1G
-  buildpack: java_buildpack
+  instances: 3
+  env:
+    JBP_CONFIG_SPRING_AUTO_RECONFIGURATION: '{enabled: false}'
+services:
+- rock-db
