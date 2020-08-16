@@ -126,10 +126,6 @@ jobs:
       manifest: git-repo/manifest-test.yml
       current_app_name: rockme-test
       path: release-candidate/spring-music*.jar
-  - task: verify
-    file: git-repo/ci/tasks/verify-test.yml
-    params:
-      CONCOURSE_DEMO_URL: {{VERIFY_URL}}
 
 - name: integrate-RockMe
   serial_groups: [version]
